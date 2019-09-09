@@ -1,0 +1,25 @@
+[package]
+name = "wsio"
+version = "0.1.0"
+authors = ["Denis Kolodin <deniskolodin@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+failure = "0.1.5"
+log = "0.4.8"
+rand = "0.7.2"
+runtime = "0.3.0-alpha.7"
+tokio = { version = "0.1.22", features = ["rt-full"] }
+tokio-tungstenite = "0.9.0"
+tungstenite = "0.9.1"
+url = "2.1.0"
+
+[dependencies.futures-legacy]
+package = "futures"
+version = "0.1.29"
+
+[dependencies.futures]
+package = "futures-preview"
+version = "0.3.0-alpha.19"
+features = ["async-await", "compat"]
+
