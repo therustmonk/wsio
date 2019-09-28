@@ -7,16 +7,15 @@ use futures::{select, SinkExt, StreamExt};
 use futures_legacy::{Sink as LegacySink, Stream as LegacyStream};
 use rand::Rng;
 use runtime::time::Interval;
-use std::fmt::Debug;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, connect_async};
 use tungstenite::{Error as WsError, Message};
 use url::Url;
 
-pub trait Protocol: Debug + Clone + Send + 'static {
-    type In: Send;
-    type Out: Send;
+pub trait Protocol: Default + Sync + Send + 'static {
+    type In: Sync + Send;
+    type Out: Sync + Send;
 
     fn do_ping(&self) -> bool;
     fn force_text(&self) -> bool;
@@ -31,55 +30,47 @@ pub struct WsIo<P: Protocol> {
 }
 
 impl<P: Protocol> WsIo<P> {
-    pub fn client(protocol: P, uri: &str) -> oneshot::Receiver<WsIo<P>> {
+    pub fn client(uri: &str) -> oneshot::Receiver<WsIo<P>> {
         log::debug!("Connect WebSocket client: {}.", uri);
         let (client_tx, client_rx) = oneshot::channel();
         let uri = uri.to_owned();
         runtime::spawn(async move {
-            if let Err(err) = WsIo::client_impl(protocol, uri, client_tx).await {
+            if let Err(err) = WsIo::client_impl(uri, client_tx).await {
                 log::error!("WsIo client failed: {}.", err);
             }
         });
         client_rx
     }
 
-    async fn client_impl(
-        protocol: P,
-        uri: String,
-        client_tx: oneshot::Sender<WsIo<P>>,
-    ) -> Result<(), Error> {
+    async fn client_impl(uri: String, client_tx: oneshot::Sender<WsIo<P>>) -> Result<(), Error> {
         let url = Url::parse(&uri)?;
         let (ws_stream, _) = connect_async(url).compat().await?;
-        let wsio = WsIoInteraction::from_stream(protocol, ws_stream);
+        let wsio = WsIoInteraction::from_stream(ws_stream);
         client_tx
             .send(wsio)
             .map_err(|_| format_err!("Can't send WsIo client"))?;
         Ok(())
     }
 
-    pub fn server(protocol: P, addr: &str) -> mpsc::Receiver<WsIo<P>> {
+    pub fn server(addr: &str) -> mpsc::Receiver<WsIo<P>> {
         log::debug!("Bind WebSocket server to: {}.", addr);
         let (clients_tx, clients_rx) = mpsc::channel(8);
         let addr = addr.to_owned();
         runtime::spawn(async move {
-            if let Err(err) = WsIo::server_impl(protocol, addr, clients_tx).await {
+            if let Err(err) = WsIo::server_impl(addr, clients_tx).await {
                 log::error!("WsIo server failed: {}.", err);
             }
         });
         clients_rx
     }
 
-    async fn server_impl(
-        protocol: P,
-        addr: String,
-        mut clients_tx: mpsc::Sender<WsIo<P>>,
-    ) -> Result<(), Error> {
+    async fn server_impl(addr: String, mut clients_tx: mpsc::Sender<WsIo<P>>) -> Result<(), Error> {
         let addr = addr.parse()?;
         let socket = TcpListener::bind(&addr)?;
         let mut incoming = socket.incoming().compat();
         while let Some(tcp_stream) = incoming.next().await.transpose()? {
             let ws_stream = accept_async(tcp_stream).compat().await?;
-            let wsio = WsIoInteraction::from_stream(protocol.clone(), ws_stream);
+            let wsio = WsIoInteraction::from_stream(ws_stream);
             clients_tx.send(wsio).await?;
         }
         Ok(())
@@ -107,7 +98,7 @@ where
     T: LegacyStream<Item = Message, Error = WsError>,
     T: LegacySink<SinkItem = Message, SinkError = WsError>,
 {
-    fn from_stream(protocol: P, ws_stream: T) -> WsIo<P> {
+    fn from_stream(ws_stream: T) -> WsIo<P> {
         let (from_ws_tx, from_ws_rx) = mpsc::channel(8);
         let (to_ws_tx, to_ws_rx) = mpsc::channel(8);
         let wsio = WsIo {
@@ -115,7 +106,7 @@ where
             from_ws_rx,
         };
         let this = Self {
-            protocol,
+            protocol: P::default(),
             ws_stream,
             to_ws_rx,
             from_ws_tx,
@@ -222,6 +213,81 @@ where
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn test_interaction() {}
+    use super::*;
+    use failure::Error;
+    use futures::{SinkExt, StreamExt};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Deserialize, Serialize, Debug, Clone)]
+    enum Request {
+        Action,
+    }
+
+    #[derive(Deserialize, Serialize, Debug, Clone)]
+    enum Response {
+        Reaction,
+    }
+
+    #[derive(Default)]
+    struct ServerProtocol;
+
+    impl Protocol for ServerProtocol {
+        type In = Response;
+        type Out = Request;
+        fn do_ping(&self) -> bool {
+            false
+        }
+        fn force_text(&self) -> bool {
+            true
+        }
+        fn encode(&self, item: &Self::In) -> Result<Vec<u8>, Error> {
+            serde_json::to_vec(item).map_err(Error::from)
+        }
+        fn decode(&self, data: &[u8]) -> Result<Self::Out, Error> {
+            serde_json::from_slice(data).map_err(Error::from)
+        }
+    }
+
+    #[derive(Default)]
+    struct ClientProtocol;
+
+    impl Protocol for ClientProtocol {
+        type In = Request;
+        type Out = Response;
+        fn do_ping(&self) -> bool {
+            true
+        }
+        fn force_text(&self) -> bool {
+            true
+        }
+        fn encode(&self, item: &Self::In) -> Result<Vec<u8>, Error> {
+            serde_json::to_vec(item).map_err(Error::from)
+        }
+        fn decode(&self, data: &[u8]) -> Result<Self::Out, Error> {
+            serde_json::from_slice(data).map_err(Error::from)
+        }
+    }
+
+    #[runtime::test(runtime_tokio::Tokio)]
+    async fn test_interaction() -> Result<(), Error> {
+        let mut server = WsIo::<ServerProtocol>::server("127.0.0.1:6776");
+        let mut client = WsIo::<ClientProtocol>::client("ws://127.0.0.1:6776").await?;
+        let mut client_on_server = server
+            .next()
+            .await
+            .ok_or_else(|| format_err!("No client connected"))?;
+        client.tx().send(Request::Action).await?;
+        let Request::Action = client_on_server
+            .rx()
+            .next()
+            .await
+            .ok_or_else(|| format_err!("No request received"))?;
+        client_on_server.tx().send(Response::Reaction).await?;
+        let Response::Reaction = client
+            .rx()
+            .next()
+            .await
+            .ok_or_else(|| format_err!("No response received"))?;
+        Ok(())
+    }
 }
