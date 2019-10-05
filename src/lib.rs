@@ -19,14 +19,14 @@ pub trait Protocol: Default + Sync + Send + 'static {
 
     fn do_ping(&self) -> bool;
     fn force_text(&self) -> bool;
-    fn encode(&self, item: &Self::In) -> Result<Vec<u8>, Error>;
-    fn decode(&self, data: &[u8]) -> Result<Self::Out, Error>;
+    fn decode(&self, data: &[u8]) -> Result<Self::In, Error>;
+    fn encode(&self, item: &Self::Out) -> Result<Vec<u8>, Error>;
 }
 
 #[derive(Debug)]
 pub struct WsIo<P: Protocol> {
-    to_ws_tx: mpsc::Sender<P::In>,
-    from_ws_rx: mpsc::Receiver<P::Out>,
+    to_ws_tx: mpsc::Sender<P::Out>,
+    from_ws_rx: mpsc::Receiver<P::In>,
 }
 
 impl<P: Protocol> WsIo<P> {
@@ -76,11 +76,11 @@ impl<P: Protocol> WsIo<P> {
         Ok(())
     }
 
-    pub fn tx(&mut self) -> &mut mpsc::Sender<P::In> {
+    pub fn tx(&mut self) -> &mut mpsc::Sender<P::Out> {
         &mut self.to_ws_tx
     }
 
-    pub fn rx(&mut self) -> &mut mpsc::Receiver<P::Out> {
+    pub fn rx(&mut self) -> &mut mpsc::Receiver<P::In> {
         &mut self.from_ws_rx
     }
 }
@@ -88,8 +88,8 @@ impl<P: Protocol> WsIo<P> {
 struct WsIoInteraction<T, P: Protocol> {
     protocol: P,
     ws_stream: T,
-    to_ws_rx: mpsc::Receiver<P::In>,
-    from_ws_tx: mpsc::Sender<P::Out>,
+    to_ws_rx: mpsc::Receiver<P::Out>,
+    from_ws_tx: mpsc::Sender<P::In>,
 }
 
 impl<T, P: Protocol> WsIoInteraction<T, P>
@@ -232,19 +232,19 @@ mod tests {
     struct ServerProtocol;
 
     impl Protocol for ServerProtocol {
-        type In = Response;
-        type Out = Request;
+        type In = Request;
+        type Out = Response;
         fn do_ping(&self) -> bool {
             false
         }
         fn force_text(&self) -> bool {
             true
         }
-        fn encode(&self, item: &Self::In) -> Result<Vec<u8>, Error> {
-            serde_json::to_vec(item).map_err(Error::from)
-        }
-        fn decode(&self, data: &[u8]) -> Result<Self::Out, Error> {
+        fn decode(&self, data: &[u8]) -> Result<Self::In, Error> {
             serde_json::from_slice(data).map_err(Error::from)
+        }
+        fn encode(&self, item: &Self::Out) -> Result<Vec<u8>, Error> {
+            serde_json::to_vec(item).map_err(Error::from)
         }
     }
 
@@ -252,19 +252,19 @@ mod tests {
     struct ClientProtocol;
 
     impl Protocol for ClientProtocol {
-        type In = Request;
-        type Out = Response;
+        type In = Response;
+        type Out = Request;
         fn do_ping(&self) -> bool {
             true
         }
         fn force_text(&self) -> bool {
             true
         }
-        fn encode(&self, item: &Self::In) -> Result<Vec<u8>, Error> {
-            serde_json::to_vec(item).map_err(Error::from)
-        }
-        fn decode(&self, data: &[u8]) -> Result<Self::Out, Error> {
+        fn decode(&self, data: &[u8]) -> Result<Self::In, Error> {
             serde_json::from_slice(data).map_err(Error::from)
+        }
+        fn encode(&self, item: &Self::Out) -> Result<Vec<u8>, Error> {
+            serde_json::to_vec(item).map_err(Error::from)
         }
     }
 
